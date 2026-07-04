@@ -9,16 +9,16 @@ Usage:
 Data and tokenizer are stored in ~/.cache/autoresearch/.
 """
 
+import argparse
+import math
 import os
+import pickle
 import sys
 import time
-import math
-import argparse
-import pickle
 from multiprocessing import Pool
 
-import requests
 import pyarrow.parquet as pq
+import requests
 import rustbpe
 import tiktoken
 import torch
@@ -267,7 +267,7 @@ def _document_batches(split, tokenizer_batch_size=128):
             pf = pq.ParquetFile(filepath)
             for rg_idx in range(pf.num_row_groups):
                 rg = pf.read_row_group(rg_idx)
-                batch = rg.column('text').to_pylist()
+                batch = rg.column("text").to_pylist()
                 for i in range(0, len(batch), tokenizer_batch_size):
                     yield batch[i:i+tokenizer_batch_size], epoch
         epoch += 1
@@ -356,7 +356,7 @@ def evaluate_bpb(model, tokenizer, batch_size):
     total_bytes = 0
     for _ in range(steps):
         x, y, _ = next(val_loader)
-        loss_flat = model(x, y, reduction='none').view(-1)
+        loss_flat = model(x, y, reduction="none").view(-1)
         y_flat = y.view(-1)
         nbytes = token_bytes[y_flat]
         mask = nbytes > 0
