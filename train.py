@@ -5,25 +5,26 @@ Usage: uv run train.py
 """
 
 import os
+
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 import gc
 import math
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from kernels import get_kernel
+
 cap = torch.cuda.get_device_capability()
 # varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
 repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
 fa3 = get_kernel(repo).flash_attn_interface
 
-from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
+from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, evaluate_bpb, make_dataloader
 
 # ---------------------------------------------------------------------------
 # GPT Model
@@ -229,8 +230,8 @@ class GPT(nn.Module):
         scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel()
         total = wte + value_embeds + lm_head + transformer_matrices + scalars
         return {
-            'wte': wte, 'value_embeds': value_embeds, 'lm_head': lm_head,
-            'transformer_matrices': transformer_matrices, 'scalars': scalars, 'total': total,
+            "wte": wte, "value_embeds": value_embeds, "lm_head": lm_head,
+            "transformer_matrices": transformer_matrices, "scalars": scalars, "total": total,
         }
 
     def setup_optimizer(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02,
@@ -248,16 +249,16 @@ class GPT(nn.Module):
         dmodel_lr_scale = (model_dim / 768) ** -0.5
         print(f"Scaling AdamW LRs by 1/sqrt({model_dim}/768) = {dmodel_lr_scale:.6f}")
         param_groups = [
-            dict(kind='adamw', params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=value_embeds_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=value_embeds_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
         ]
         for shape in sorted({p.shape for p in matrix_params}):
             group_params = [p for p in matrix_params if p.shape == shape]
             param_groups.append(dict(
-                kind='muon', params=group_params, lr=matrix_lr,
+                kind="muon", params=group_params, lr=matrix_lr,
                 momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=weight_decay,
             ))
         optimizer = MuonAdamW(param_groups)
@@ -265,7 +266,7 @@ class GPT(nn.Module):
             group["initial_lr"] = group["lr"]
         return optimizer
 
-    def forward(self, idx, targets=None, reduction='mean'):
+    def forward(self, idx, targets=None, reduction="mean"):
         B, T = idx.size()
         assert T <= self.cos.size(1)
         cos_sin = self.cos[:, :T], self.sin[:, :T]
@@ -371,28 +372,28 @@ class MuonAdamW(torch.optim.Optimizer):
         self._muon_beta2_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
 
     def _step_adamw(self, group):
-        for p in group['params']:
+        for p in group["params"]:
             if p.grad is None:
                 continue
             grad = p.grad
             state = self.state[p]
             if not state:
-                state['step'] = 0
-                state['exp_avg'] = torch.zeros_like(p)
-                state['exp_avg_sq'] = torch.zeros_like(p)
-            state['step'] += 1
-            self._adamw_step_t.fill_(state['step'])
-            self._adamw_lr_t.fill_(group['lr'])
-            self._adamw_beta1_t.fill_(group['betas'][0])
-            self._adamw_beta2_t.fill_(group['betas'][1])
-            self._adamw_eps_t.fill_(group['eps'])
-            self._adamw_wd_t.fill_(group['weight_decay'])
-            adamw_step_fused(p, grad, state['exp_avg'], state['exp_avg_sq'],
+                state["step"] = 0
+                state["exp_avg"] = torch.zeros_like(p)
+                state["exp_avg_sq"] = torch.zeros_like(p)
+            state["step"] += 1
+            self._adamw_step_t.fill_(state["step"])
+            self._adamw_lr_t.fill_(group["lr"])
+            self._adamw_beta1_t.fill_(group["betas"][0])
+            self._adamw_beta2_t.fill_(group["betas"][1])
+            self._adamw_eps_t.fill_(group["eps"])
+            self._adamw_wd_t.fill_(group["weight_decay"])
+            adamw_step_fused(p, grad, state["exp_avg"], state["exp_avg_sq"],
                             self._adamw_step_t, self._adamw_lr_t, self._adamw_beta1_t,
                             self._adamw_beta2_t, self._adamw_eps_t, self._adamw_wd_t)
 
     def _step_muon(self, group):
-        params = group['params']
+        params = group["params"]
         if not params:
             return
         p = params[0]
@@ -420,9 +421,9 @@ class MuonAdamW(torch.optim.Optimizer):
     @torch.no_grad()
     def step(self):
         for group in self.param_groups:
-            if group['kind'] == 'adamw':
+            if group["kind"] == "adamw":
                 self._step_adamw(group)
-            elif group['kind'] == 'muon':
+            elif group["kind"] == "muon":
                 self._step_muon(group)
 
 # ---------------------------------------------------------------------------
@@ -488,7 +489,7 @@ param_counts = model.num_scaling_params()
 print("Parameter counts:")
 for key, value in param_counts.items():
     print(f"  {key:24s}: {value:,}")
-num_params = param_counts['total']
+num_params = param_counts["total"]
 num_flops_per_token = model.estimate_flops()
 print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 
@@ -558,7 +559,7 @@ while True:
     muon_weight_decay = get_weight_decay(progress)
     for group in optimizer.param_groups:
         group["lr"] = group["initial_lr"] * lrm
-        if group['kind'] == 'muon':
+        if group["kind"] == "muon":
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
     optimizer.step()
