@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  autoresearch:
+    build: .
+    container_name: autoresearch
+    environment:
+      - TRAIN_TIME_MINUTES=${TRAIN_TIME_MINUTES:-5}
+      - DEVICE=${DEVICE:-cuda}
+      - SEED=${SEED:-42}
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: "no"
