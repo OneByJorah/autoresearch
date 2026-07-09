@@ -103,3 +103,9 @@ This repository is a fork of [karpathy/autoresearch](https://github.com/karpathy
 ## License
 
 MIT
+
+---
+
+[![Built by](https://img.shields.io/badge/built%20by-JorahOne%20LLC-FFB300?style=for-the-badge&labelColor=0d0d0c)](https://github.com/OneByJorah)
+
+<sub>Fork maintained by JorahOne, LLC as part of the JorahOne infrastructure ecosystem.</sub>
