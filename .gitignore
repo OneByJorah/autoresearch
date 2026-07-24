@@ -25,3 +25,6 @@ results.tsv
 # Pipeline reports
 reports/
 pipeline-report.json
+
+# OneByJorah portfolio tooling
+.venv-screenshot/
