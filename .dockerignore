@@ -1,0 +1,13 @@
+.git
+.gitignore
+.github
+docs
+.env
+.env.*
+output/
+data/
+__pycache__/
+*.pyc
+*.pyo
+analysis.ipynb
+README.md

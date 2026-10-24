@@ -19,115 +19,145 @@ AI agents running research on single-GPU nanochat training automatically
 
 <br>
 
----
+## Why this exists
+
+Reproducing a pretraining result usually means a cluster, a week of wall clock, and a scheduler. autoresearch compresses the loop to one GPU and a fixed five-minute budget, with a single metric — `val_bpb` — computed by a harness the agent is not allowed to touch. That makes one experiment cheap enough to run a few times an hour, and cheap enough for an agent to try ideas unsupervised overnight. You write the research direction in `program.md`, the agent edits `train.py`, and only changes that lower `val_bpb` survive.
 
 ## Features
 
-- **Autonomous Research** — AI agents iteratively optimize training code.
-- **Single-GPU Training** — Designed for nanochat models on single GPUs.
-- **Human-in-the-Loop** — Human-managed `program.md` guides research direction.
-- **Automatic Iteration** — Agents improve `train.py` automatically.
-- **Experiment Logging** — Track all experiments and results.
-- **Reproducible Results** — Full experiment history for reproducibility.
+- **Fixed-cost experiments** — every run stops after a 5-minute training budget, so results are directly comparable.
+- **One metric** — `val_bpb` (bits per byte) from `evaluate_bpb` in `prepare.py`, which is read-only for the agent.
+- **Single GPU, single file** — `train.py` holds the model, the MuonAdamW optimizer, and the training loop.
+- **Human-defined direction** — `program.md` is the protocol the agent follows each run.
+- **Reproducible log** — every attempt is recorded in `results.tsv` (commit, score, memory, status, description).
 
 ## Quick Start
+
+Requirements: an NVIDIA GPU (Hopper for the `varunneal/flash-attention-3` kernel, other GPUs fall back to `kernels-community/flash-attn3`), Python 3.10+, and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/OneByJorah/autoresearch.git
 cd autoresearch
 
-pip install -r requirements.txt
+# 1. Install uv (skip if already on PATH)
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-cp program.example.md program.md
-# Edit program.md with your research goals
+# 2. Install dependencies from pyproject.toml + uv.lock
+uv sync
 
-# Start the research loop
-python3 main.py
+# 3. One-time data prep: download parquet shards and train the tokenizer
+#    Writes to ~/.cache/autoresearch/ (use --num-shards to fetch less)
+uv run prepare.py
+
+# 4. Run one 5-minute training experiment
+uv run train.py
 ```
 
-## How It Works
+`train.py` prints a summary ending in the metric:
 
-1. **Program Definition** — You define research goals in `program.md`
-2. **Agent Execution** — AI agent reads the program and current code
-3. **Code Generation** — Agent proposes improvements to `train.py`
-4. **Training Run** — Code is executed on single GPU
-5. **Evaluation** — Results are evaluated against metrics
-6. **Iteration** — Agent learns from results and proposes next iteration
+```
+---
+val_bpb:          0.997900
+training_seconds: 300.1
+total_seconds:    325.9
+peak_vram_mb:     45060.2
+mfu_percent:      39.80
+total_tokens_M:   499.6
+num_steps:        953
+num_params_M:     50.3
+depth:            8
+```
+
+No checkpoints are written — the printed summary is the result. To drive the loop with an agent, hand it `program.md` and let it edit `train.py` between runs.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    HF[("HuggingFace<br/>climbmix-400b-shuffle")] -->|"prepare.py<br/>download shards"| DATA[("~/.cache/autoresearch/data<br/>parquet shards")]
+    DATA -->|"prepare.py<br/>rustbpe + tiktoken"| TOK[("~/.cache/autoresearch/tokenizer<br/>tokenizer.pkl, token_bytes.pt")]
+
+    PROG["program.md<br/>research protocol"] --> AGENT["Agent"]
+    AGENT -->|"edits one file"| TRAIN["train.py"]
+
+    TOK --> TRAIN
+    DATA -->|"prepare.py<br/>make_dataloader"| TRAIN
+    TRAIN -->|"GPT + MuonAdamW<br/>300s budget"| GPU["Model in GPU memory"]
+    GPU -->|"prepare.py<br/>evaluate_bpb"| RESULT["val_bpb summary<br/>printed to stdout"]
+    RESULT -->|"recorded"| TSV["results.tsv"]
+    TSV --> AGENT
+```
+
+`prepare.py` owns everything fixed: constants, shard download, tokenizer training, the BOS-aligned dataloader, and the evaluation. `train.py` imports from it and owns everything the experiment may change. The agent's loop is:
+
+1. Read `program.md` and the current `train.py`.
+2. Change one thing — architecture, hyperparameters, optimizer, batch size.
+3. `git commit`, then `uv run train.py > run.log 2>&1`.
+4. `grep "^val_bpb:" run.log` and append the row to `results.tsv`.
+5. Keep the commit if `val_bpb` improved; reset if it did not.
 
 ## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OPENAI_API_KEY` | *(empty)* | OpenAI API key for agent |
-| `GPU_DEVICE` | `cuda:0` | GPU device for training |
-| `MAX_ITERATIONS` | `100` | Maximum research iterations |
-| `SAVE_INTERVAL` | `10` | Checkpoint save interval |
-| `LOG_DIR` | `./logs` | Experiment log directory |
+The code reads **no environment variables**. Everything is set in source:
+
+| Setting | File | Default | Purpose |
+|---------|------|---------|---------|
+| `TIME_BUDGET` | `prepare.py` | `300` | Training seconds per run |
+| `MAX_SEQ_LEN` | `prepare.py` | `2048` | Context length |
+| `VOCAB_SIZE` | `prepare.py` | `8192` | Tokenizer vocabulary |
+| `EVAL_TOKENS` | `prepare.py` | `40 * 524288` | Tokens used for the validation pass |
+| `DEPTH` | `train.py` | `8` | Transformer layers |
+| `DEVICE_BATCH_SIZE` | `train.py` | `128` | Micro-batch size (lower it to fit VRAM) |
+| `TOTAL_BATCH_SIZE` | `train.py` | `2**19` | Tokens per optimizer step |
+| `ASPECT_RATIO` / `HEAD_DIM` | `train.py` | `64` / `128` | Model width and attention head size |
+| `WINDOW_PATTERN` | `train.py` | `"SSSL"` | Sliding-window attention pattern |
+
+`prepare.py` is fixed by the rules in `program.md`; `train.py` is the file experiments are allowed to change. `train.py` also sets `PYTORCH_ALLOC_CONF=expandable_segments:True` and `HF_HUB_DISABLE_PROGRESS_BARS=1` for itself at import time, so neither needs to be exported.
 
 ## Project Structure
 
 ```
 autoresearch/
-├── main.py              # Research loop entry point
-├── agent.py             # AI agent logic
-├── train.py             # Training code (auto-improved)
-├── evaluate.py          # Evaluation metrics
-├── program.md           # Research program definition
-├── logs/                # Experiment logs
-├── checkpoints/         # Model checkpoints
-├── requirements.txt     # Python dependencies
-└── README.md
+├── prepare.py           # Data download, tokenizer, dataloader, evaluate_bpb (fixed)
+├── train.py             # GPT model, MuonAdamW, training loop (the file agents edit)
+├── program.md           # Research protocol the agent follows
+├── analysis.ipynb       # Plots and outcome breakdown from results.tsv
+├── pyproject.toml       # Dependencies plus the PyTorch cu128 uv index
+├── uv.lock              # Locked dependency set
+├── j1.yaml              # Portfolio metadata
+├── Dockerfile           # uv-based image, CLI only, no web server
+├── docker-compose.yml   # Single GPU service with ./data and ./output mounts
+├── .env.example         # Empty template; the code reads no env vars
+└── docs/assets/         # Banner and screenshot
 ```
 
-## Research Program Format
+## Docker
 
-```markdown
-# Research Program
+```bash
+docker compose up --build
+```
 
-## Objective
-Optimize nanochat training for single-GPU deployment.
+The compose file reserves one NVIDIA GPU and mounts `./data` and `./output`. Training reads from `~/.cache/autoresearch/`, not from those mounts, so run `uv run prepare.py` on the host or add the cache path as a volume before the container can train.
 
-## Metrics
-- Training loss < 0.1
-- Inference latency < 100ms
-- Model size < 500MB
+## Requirements
 
-## Constraints
-- Single GPU (24GB VRAM max)
 - Python 3.10+
-- PyTorch 2.0+
-
-## Evaluation
-- Run on validation set
-- Report metrics after each iteration
-```
+- `torch==2.9.1` (cu128 index, pinned in `pyproject.toml`)
+- `kernels` for FlashAttention-3, `rustbpe` + `tiktoken` for the tokenizer, `pyarrow` for shards
+- The reference run in `program.md` peaks near 45 GB at the default depth of 8; reduce `DEVICE_BATCH_SIZE` or `DEPTH` if your GPU has less
 
 ## Contributing
 
-Contributions are welcome. Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community standards.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community standards. One concern per pull request, and keep changes focused enough to review in one sitting.
 
 ## Security
 
-For security concerns, see [SECURITY.md](SECURITY.md). Please report vulnerabilities to **info@jorahone.com** — do not use public issues.
+Report vulnerabilities privately to **security@jorahone.com** — do not open a public issue. See [SECURITY.md](SECURITY.md) for the full policy and response window.
 
 ## License
 
-MIT © Jhonattan L. Jimenez
+[MIT](LICENSE) © Jhonattan L. Jimenez (OneByJorah)
 
 ---
 
-## 🤝 Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). All contributions follow the [Code of Conduct](CODE_OF_CONDUCT.md).
-
-## 🔒 Security
-
-Found a vulnerability? Please follow our [Security Policy](SECURITY.md) and report privately to `security@jorahone.com`.
-
-## 📄 License
-
-[MIT License](LICENSE) © Jhonattan L. Jimenez (OneByJorah)
-
----
-
-<p align="center">Built with 🌴 by <a href="https://github.com/OneByJorah">OneByJorah</a> · <a href="https://jorahone.com">jorahone.com</a></p>
+<p align="center">Built by <a href="https://github.com/OneByJorah">OneByJorah</a> · <a href="https://jorahone.com">jorahone.com</a></p>
